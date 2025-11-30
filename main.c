@@ -74,7 +74,7 @@ typedef struct {
 } Config;
 
 Config currentConfig = {
-    "", "", "example.com:443", "", "127.0.0.1:30000", 3, "cloudflare-ech.com"
+    "dns.alidns.com/dns-query", "cloudflare-ech.com", "example.com:443", "", "127.0.0.1:30000", 3, ""
 };
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
