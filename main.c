@@ -529,7 +529,7 @@ void StartProcess() {
     APPEND_ARG("-token", currentConfig.token);
     APPEND_ARG("-ip", currentConfig.ip);
     
-    if (strlen(currentConfig.dns) > 0 && strcmp(currentConfig.dns, "119.29.29.29:53") != 0) {
+    if (strlen(currentConfig.dns) > 0 && strcmp(currentConfig.dns, "dns.alidns.com/dns-query") != 0) {
         APPEND_ARG("-dns", currentConfig.dns);
     }
     if (strlen(currentConfig.ech) > 0 && strcmp(currentConfig.ech, "cloudflare-ech.com") != 0) {
