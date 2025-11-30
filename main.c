@@ -775,40 +775,53 @@ void SaveConfigToFile() {
     SetFocus(hEdit);
     SendMessage(hEdit, EM_SETSEL, 0, -1);
     
+    // 修复：改进消息循环，正确处理对话框消息
     MSG msg;
     BOOL dialogResult = FALSE;
-    while (GetMessage(&msg, NULL, 0, 0)) {
-        if (msg.message == WM_COMMAND) {
-            if (LOWORD(msg.wParam) == IDOK) {
-                GetWindowText(hEdit, newConfigName, sizeof(newConfigName));
-                
-                char* start = newConfigName;
-                while (*start == ' ') start++;
-                char* end = start + strlen(start) - 1;
-                while (end > start && *end == ' ') end--;
-                *(end + 1) = '\0';
-                memmove(newConfigName, start, strlen(start) + 1);
-                
-                if (strlen(newConfigName) == 0) {
-                    MessageBox(hDialog, "配置名称不能为空", "提示", MB_OK | MB_ICONWARNING);
-                    SetFocus(hEdit);
+    BOOL dialogRunning = TRUE;
+    
+    while (dialogRunning && GetMessage(&msg, NULL, 0, 0)) {
+        // 检查是否是对话框或其子控件的消息
+        if (msg.hwnd == hDialog || IsChild(hDialog, msg.hwnd)) {
+            if (msg.message == WM_COMMAND) {
+                if (LOWORD(msg.wParam) == IDOK) {
+                    GetWindowText(hEdit, newConfigName, sizeof(newConfigName));
+                    
+                    // 去除首尾空格
+                    char* start = newConfigName;
+                    while (*start == ' ') start++;
+                    char* end = start + strlen(start) - 1;
+                    while (end > start && *end == ' ') end--;
+                    *(end + 1) = '\0';
+                    memmove(newConfigName, start, strlen(start) + 1);
+                    
+                    if (strlen(newConfigName) == 0) {
+                        MessageBox(hDialog, "配置名称不能为空", "提示", MB_OK | MB_ICONWARNING);
+                        SetFocus(hEdit);
+                        continue;
+                    }
+                    
+                    dialogResult = TRUE;
+                    dialogRunning = FALSE;
+                    DestroyWindow(hDialog);
+                    continue;
+                } else if (LOWORD(msg.wParam) == IDCANCEL) {
+                    dialogRunning = FALSE;
+                    DestroyWindow(hDialog);
                     continue;
                 }
-                
-                dialogResult = TRUE;
+            } else if (msg.message == WM_CLOSE) {
+                dialogRunning = FALSE;
                 DestroyWindow(hDialog);
-                break;
-            } else if (LOWORD(msg.wParam) == IDCANCEL) {
-                DestroyWindow(hDialog);
-                break;
+                continue;
             }
-        } else if (msg.message == WM_CLOSE || msg.message == WM_DESTROY) {
-            DestroyWindow(hDialog);
-            break;
         }
         
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
+        // 处理Tab键切换焦点
+        if (!IsDialogMessage(hDialog, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
     }
     
     if (!dialogResult) {
@@ -816,6 +829,7 @@ void SaveConfigToFile() {
         return;
     }
     
+    // 更新当前配置名称
     strcpy(currentConfig.configName, newConfigName);
     UpdateConfigNameDisplay();
     
@@ -842,7 +856,6 @@ void SaveConfigToFile() {
     snprintf(logMsg, sizeof(logMsg), "[配置] 已保存配置: %s\r\n", fileName);
     AppendLog(logMsg);
 }
-
 void LoadConfigFromFile() {
     OPENFILENAME ofn;
     char fileName[MAX_PATH] = "";
