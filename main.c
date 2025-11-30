@@ -7,13 +7,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define SINGLE_INSTANCE_MUTEX_NAME "ECHWorkerClient_Mutex_Unique_ID"
+#define SINGLE_INSTANCE_MUTEX_NAME "ECHTunnelClient_Mutex_Unique_ID"
 #define IDI_APP_ICON 101 
 
 typedef BOOL (WINAPI *SetProcessDPIAwareFunc)(void);
 
 #define APP_VERSION "1.0"
-#define APP_TITLE "ECH workers 客户端 v" APP_VERSION
+#define APP_TITLE "ECH Tunnel 客户端 v" APP_VERSION
 
 #define MAX_URL_LEN 8192
 #define MAX_SMALL_LEN 2048
@@ -44,6 +44,9 @@ int Scale(int x) {
 #define ID_IP_EDIT          1004
 #define ID_DNS_EDIT         1005
 #define ID_ECH_EDIT         1006
+#define ID_CONN_EDIT        1007
+#define ID_CONN_UP          1008
+#define ID_CONN_DOWN        1009
 #define ID_START_BTN        1010
 #define ID_STOP_BTN         1011
 #define ID_CLEAR_LOG_BTN    1012
@@ -53,7 +56,7 @@ int Scale(int x) {
 
 HWND hMainWindow;
 HWND hConfigNameLabel, hServerEdit, hListenEdit, hTokenEdit, hIpEdit, hDnsEdit, hEchEdit;
-HWND hStartBtn, hStopBtn, hLogEdit, hSaveConfigBtn, hLoadConfigBtn;
+HWND hConnEdit, hStartBtn, hStopBtn, hLogEdit, hSaveConfigBtn, hLoadConfigBtn;
 PROCESS_INFORMATION processInfo;
 HANDLE hLogPipe = NULL;
 HANDLE hLogThread = NULL;
@@ -67,11 +70,12 @@ typedef struct {
     char server[MAX_URL_LEN];    
     char ip[MAX_SMALL_LEN];      
     char listen[MAX_SMALL_LEN];  
+    int connections;
     char token[MAX_URL_LEN];     
 } Config;
 
 Config currentConfig = {
-    "默认配置", "dns.alidns.com/dns-query", "cloudflare-ech.com", "example.com:443", "", "127.0.0.1:30000", ""
+    "默认配置", "dns.alidns.com/dns-query", "cloudflare-ech.com", "example.com:443", "", "127.0.0.1:30000", 3, ""
 };
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
@@ -97,7 +101,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     
     HANDLE hMutex = CreateMutex(NULL, TRUE, SINGLE_INSTANCE_MUTEX_NAME);
     if (hMutex != NULL && GetLastError() == ERROR_ALREADY_EXISTS) {
-        HWND hExistingWnd = FindWindow("ECHWorkerClient", NULL); 
+        HWND hExistingWnd = FindWindow("ECHTunnelClient", NULL); 
         if (hExistingWnd) {
             PostMessage(hExistingWnd, WM_TRAYICON, ID_TRAY_ICON, WM_LBUTTONUP);
         }
@@ -135,7 +139,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     WNDCLASS wc = {0};
     wc.lpfnWndProc = WindowProc;
     wc.hInstance = hInstance;
-    wc.lpszClassName = "ECHWorkerClient";
+    wc.lpszClassName = "ECHTunnelClient";
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1); 
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     
@@ -152,7 +156,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     DWORD winStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
 
     hMainWindow = CreateWindowEx(
-        0, "ECHWorkerClient", APP_TITLE, 
+        0, "ECHTunnelClient", APP_TITLE, 
         winStyle,
         (screenW - winWidth) / 2, (screenH - winHeight) / 2, 
         winWidth, winHeight,
@@ -284,7 +288,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                     if (!isProcessRunning) {
                         GetControlValues();
                         if (strlen(currentConfig.server) == 0) {
-                            MessageBox(hwnd, "请输入服务地址", "提示", MB_OK | MB_ICONWARNING);
+                            MessageBox(hwnd, "请输入服务地址 (wss://...)", "提示", MB_OK | MB_ICONWARNING);
                             SetFocus(hServerEdit);
                             break;
                         }
@@ -305,6 +309,28 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 case ID_CLEAR_LOG_BTN:
                     SetWindowText(hLogEdit, "");
                     break;
+
+                case ID_CONN_UP: {
+                    char buf[16];
+                    GetWindowText(hConnEdit, buf, 16);
+                    int val = atoi(buf);
+                    if (val < 20) {
+                        sprintf(buf, "%d", val + 1);
+                        SetWindowText(hConnEdit, buf);
+                    }
+                    break;
+                }
+
+                case ID_CONN_DOWN: {
+                    char buf[16];
+                    GetWindowText(hConnEdit, buf, 16);
+                    int val = atoi(buf);
+                    if (val > 1) {
+                        sprintf(buf, "%d", val - 1);
+                        SetWindowText(hConnEdit, buf);
+                    }
+                    break;
+                }
 
                 case ID_SAVE_CONFIG_BTN:
                     GetControlValues();
@@ -340,16 +366,17 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     }
     return 0;
 }
+
 void CreateLabelAndEdit(HWND parent, const char* labelText, int x, int y, int w, int h, int editId, HWND* outEdit, BOOL numberOnly) {
     HWND hStatic = CreateWindow("STATIC", labelText, WS_VISIBLE | WS_CHILD | SS_LEFT, 
-        x, y + Scale(3), Scale(140), Scale(20), parent, NULL, NULL, NULL);
+        x, y + Scale(3), Scale(100), Scale(20), parent, NULL, NULL, NULL);
     SendMessage(hStatic, WM_SETFONT, (WPARAM)hFontUI, TRUE);
 
     DWORD style = WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL;
     if (numberOnly) style |= ES_NUMBER | ES_CENTER;
 
     *outEdit = CreateWindow("EDIT", "", style, 
-        x + Scale(150), y, w - Scale(150), h, parent, (HMENU)(intptr_t)editId, NULL, NULL);
+        x + Scale(110), y, w - Scale(110), h, parent, (HMENU)(intptr_t)editId, NULL, NULL);
     SendMessage(*outEdit, WM_SETFONT, (WPARAM)hFontUI, TRUE);
     SendMessage(*outEdit, EM_SETLIMITTEXT, (editId == ID_SERVER_EDIT || editId == ID_TOKEN_EDIT) ? MAX_URL_LEN : MAX_SMALL_LEN, 0);
 }
@@ -373,39 +400,69 @@ void CreateControls(HWND hwnd) {
 
     curY += lineHeight + Scale(5);
 
-    int group1H = Scale(80);
+    // 核心配置
+    int group1H = Scale(110);
     HWND hGroup1 = CreateWindow("BUTTON", "核心配置", WS_VISIBLE | WS_CHILD | BS_GROUPBOX,
         margin, curY, groupW, group1H, hwnd, NULL, NULL, NULL);
     SendMessage(hGroup1, WM_SETFONT, (WPARAM)hFontUI, TRUE);
     
     int innerY = curY + Scale(25);
+    
+    int midGap = Scale(20); 
+    int halfW = (groupW - Scale(30) - midGap) / 2; 
+    int col2X = margin + Scale(15) + halfW + midGap;
 
+    // 1. 服务地址
     CreateLabelAndEdit(hwnd, "服务地址:", margin + Scale(15), innerY, groupW - Scale(30), editH, ID_SERVER_EDIT, &hServerEdit, FALSE);
     innerY += lineHeight + lineGap;
 
-    CreateLabelAndEdit(hwnd, "监听地址:", margin + Scale(15), innerY, groupW - Scale(30), editH, ID_LISTEN_EDIT, &hListenEdit, FALSE);
+    // 2. 监听地址
+    CreateLabelAndEdit(hwnd, "监听地址:", margin + Scale(15), innerY, halfW, editH, ID_LISTEN_EDIT, &hListenEdit, FALSE);
+    
+    // 3. 并发连接
+    HWND hLbl = CreateWindow("STATIC", "并发连接:", WS_VISIBLE | WS_CHILD, col2X, innerY + Scale(3), Scale(80), Scale(20), hwnd, NULL, NULL, NULL);
+    SendMessage(hLbl, WM_SETFONT, (WPARAM)hFontUI, TRUE);
+
+    int btnSize = Scale(26);
+    int numW = Scale(50);
+    int numX = col2X + Scale(85);
+
+    hConnEdit = CreateWindow("EDIT", "3", WS_VISIBLE | WS_CHILD | WS_BORDER | ES_NUMBER | ES_CENTER, 
+        numX, innerY, numW, editH, hwnd, (HMENU)ID_CONN_EDIT, NULL, NULL);
+    SendMessage(hConnEdit, WM_SETFONT, (WPARAM)hFontUI, TRUE);
+
+    HWND hBtnDown = CreateWindow("BUTTON", "-", WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON, 
+        numX + numW + Scale(5), innerY, btnSize, editH, hwnd, (HMENU)ID_CONN_DOWN, NULL, NULL);
+    SendMessage(hBtnDown, WM_SETFONT, (WPARAM)hFontUI, TRUE);
+
+    HWND hBtnUp = CreateWindow("BUTTON", "+", WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON, 
+        numX + numW + Scale(5) + btnSize + Scale(5), innerY, btnSize, editH, hwnd, (HMENU)ID_CONN_UP, NULL, NULL);
+    SendMessage(hBtnUp, WM_SETFONT, (WPARAM)hFontUI, TRUE);
 
     curY += group1H + Scale(15);
 
+    // 高级选项
     int group2H = Scale(155);
     HWND hGroup2 = CreateWindow("BUTTON", "高级选项 (可选)", WS_VISIBLE | WS_CHILD | BS_GROUPBOX,
         margin, curY, groupW, group2H, hwnd, NULL, NULL, NULL);
     SendMessage(hGroup2, WM_SETFONT, (WPARAM)hFontUI, TRUE);
     innerY = curY + Scale(25);
 
+    // 4. 身份令牌
     CreateLabelAndEdit(hwnd, "身份令牌:", margin + Scale(15), innerY, groupW - Scale(30), editH, ID_TOKEN_EDIT, &hTokenEdit, FALSE);
     innerY += lineHeight + lineGap;
 
-    CreateLabelAndEdit(hwnd, "优选IP(域名):", margin + Scale(15), innerY, groupW - Scale(30), editH, ID_IP_EDIT, &hIpEdit, FALSE);
+    // 5. 指定IP 和 DNS
+    CreateLabelAndEdit(hwnd, "指定IP:", margin + Scale(15), innerY, halfW, editH, ID_IP_EDIT, &hIpEdit, FALSE);
+    CreateLabelAndEdit(hwnd, "DNS服务器:", col2X, innerY, halfW, editH, ID_DNS_EDIT, &hDnsEdit, FALSE);
     innerY += lineHeight + lineGap;
 
+    // 6. ECH
     CreateLabelAndEdit(hwnd, "ECH域名:", margin + Scale(15), innerY, groupW - Scale(30), editH, ID_ECH_EDIT, &hEchEdit, FALSE);
-    innerY += lineHeight + lineGap;
-
-    CreateLabelAndEdit(hwnd, "DNS服务器(仅域名):", margin + Scale(15), innerY, groupW - Scale(30), editH, ID_DNS_EDIT, &hDnsEdit, FALSE);
 
     curY += group2H + Scale(15);
 
+    // 按钮栏
     int btnW = Scale(120);
     int btnH = Scale(38);
     int btnGap = Scale(20);
@@ -434,6 +491,7 @@ void CreateControls(HWND hwnd) {
 
     curY += btnH + Scale(15);
 
+    // 日志区域
     HWND hLogLabel = CreateWindow("STATIC", "运行日志:", WS_VISIBLE | WS_CHILD, 
         margin, curY, Scale(100), Scale(20), hwnd, NULL, NULL, NULL);
     SendMessage(hLogLabel, WM_SETFONT, (WPARAM)hFontUI, TRUE);
@@ -450,42 +508,52 @@ void CreateControls(HWND hwnd) {
 void GetControlValues() {
     char buf[MAX_URL_LEN];
     GetWindowText(hServerEdit, buf, sizeof(buf));
-    strcpy(currentConfig.server, buf);
+    if (strlen(buf) > 0 && strncmp(buf, "wss://", 6) != 0) snprintf(currentConfig.server, sizeof(currentConfig.server), "wss://%s", buf);
+    else strcpy(currentConfig.server, buf);
 
     GetWindowText(hListenEdit, buf, sizeof(buf));
-    strcpy(currentConfig.listen, buf);
+    if (strlen(buf) > 0 && strncmp(buf, "proxy://", 8) != 0) snprintf(currentConfig.listen, sizeof(currentConfig.listen), "proxy://%s", buf);
+    else strcpy(currentConfig.listen, buf);
 
     GetWindowText(hTokenEdit, currentConfig.token, sizeof(currentConfig.token));
     GetWindowText(hIpEdit, currentConfig.ip, sizeof(currentConfig.ip));
     GetWindowText(hDnsEdit, currentConfig.dns, sizeof(currentConfig.dns));
     GetWindowText(hEchEdit, currentConfig.ech, sizeof(currentConfig.ech));
+
+    char connBuf[32];
+    GetWindowText(hConnEdit, connBuf, 32);
+    currentConfig.connections = atoi(connBuf);
+    if (currentConfig.connections < 1) currentConfig.connections = 1;
 }
 
 void SetControlValues() {
-    SetWindowText(hServerEdit, currentConfig.server);
-    SetWindowText(hListenEdit, currentConfig.listen);
+    if (strncmp(currentConfig.server, "wss://", 6) == 0) SetWindowText(hServerEdit, currentConfig.server + 6);
+    else SetWindowText(hServerEdit, currentConfig.server);
+
+    if (strncmp(currentConfig.listen, "proxy://", 8) == 0) SetWindowText(hListenEdit, currentConfig.listen + 8);
+    else SetWindowText(hListenEdit, currentConfig.listen);
+
     SetWindowText(hTokenEdit, currentConfig.token);
     SetWindowText(hIpEdit, currentConfig.ip);
     SetWindowText(hDnsEdit, currentConfig.dns);
     SetWindowText(hEchEdit, currentConfig.ech);
+
+    char connBuf[32];
+    sprintf(connBuf, "%d", currentConfig.connections);
+    SetWindowText(hConnEdit, connBuf);
 }
 
 void StartProcess() {
     char cmdLine[MAX_CMD_LEN];
-    char exePath[MAX_PATH] = "ech-workers.exe";
+    char exePath[MAX_PATH] = "ech-tunnel.exe";
     
     if (GetFileAttributes(exePath) == INVALID_FILE_ATTRIBUTES) {
-        AppendLog("错误: 找不到 ech-workers.exe 文件!\r\n");
+        AppendLog("错误: 找不到 ech-tunnel.exe 文件!\r\n");
         return;
     }
     
     snprintf(cmdLine, MAX_CMD_LEN, "\"%s\"", exePath);
-    
-    #define APPEND_ARG(flag, val) if(strlen(val) > 0) { \
-        strcat(cmdLine, " " flag " \""); \
-        strcat(cmdLine, val); \
-        strcat(cmdLine, "\""); \
-    }
+    #define APPEND_ARG(flag, val) if(strlen(val) > 0) { strcat(cmdLine, " " flag " \""); strcat(cmdLine, val); strcat(cmdLine, "\""); }
 
     APPEND_ARG("-f", currentConfig.server);
     APPEND_ARG("-l", currentConfig.listen);
@@ -513,6 +581,11 @@ void StartProcess() {
     
     if (strlen(currentConfig.ech) > 0 && strcmp(currentConfig.ech, "cloudflare-ech.com") != 0) {
         APPEND_ARG("-ech", currentConfig.ech);
+    }
+    
+    if (currentConfig.connections != 3) {
+        char nBuf[32]; sprintf(nBuf, " -n %d", currentConfig.connections);
+        strcat(cmdLine, nBuf);
     }
 
     SECURITY_ATTRIBUTES sa = { sizeof(SECURITY_ATTRIBUTES), NULL, TRUE };
@@ -622,9 +695,9 @@ void AppendLog(const char* text) {
 void SaveConfig() {
     FILE* f = fopen("config.ini", "w");
     if (!f) return;
-    fprintf(f, "[ECHTunnel]\nconfigName=%s\nserver=%s\nlisten=%s\ntoken=%s\nip=%s\ndns=%s\nech=%s\n",
+    fprintf(f, "[ECHTunnel]\nconfigName=%s\nserver=%s\nlisten=%s\ntoken=%s\nip=%s\ndns=%s\nech=%s\nconnections=%d\n",
         currentConfig.configName, currentConfig.server, currentConfig.listen, currentConfig.token, 
-        currentConfig.ip, currentConfig.dns, currentConfig.ech);
+        currentConfig.ip, currentConfig.dns, currentConfig.ech, currentConfig.connections);
     fclose(f);
 }
 
@@ -645,6 +718,7 @@ void LoadConfig() {
         else if (!strcmp(line, "ip")) strcpy(currentConfig.ip, val);
         else if (!strcmp(line, "dns")) strcpy(currentConfig.dns, val);
         else if (!strcmp(line, "ech")) strcpy(currentConfig.ech, val);
+        else if (!strcmp(line, "connections")) currentConfig.connections = atoi(val);
     }
     fclose(f);
 }
@@ -652,7 +726,6 @@ void LoadConfig() {
 void SaveConfigToFile() {
     char newConfigName[MAX_SMALL_LEN] = "";
     
-    // 创建对话框让用户输入配置名称
     HWND hDialog = CreateWindowEx(
         WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
         "STATIC", "输入配置名称",
@@ -666,7 +739,6 @@ void SaveConfigToFile() {
         return;
     }
     
-    // 居中显示
     RECT rcParent, rcDialog;
     GetWindowRect(hMainWindow, &rcParent);
     GetWindowRect(hDialog, &rcDialog);
@@ -674,14 +746,12 @@ void SaveConfigToFile() {
     int y = rcParent.top + (rcParent.bottom - rcParent.top - (rcDialog.bottom - rcDialog.top)) / 2;
     SetWindowPos(hDialog, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
     
-    // 创建提示标签
     HWND hLabel = CreateWindow("STATIC", "请输入配置名称:",
         WS_VISIBLE | WS_CHILD,
         Scale(20), Scale(20), Scale(300), Scale(20),
         hDialog, NULL, NULL, NULL);
     SendMessage(hLabel, WM_SETFONT, (WPARAM)hFontUI, TRUE);
     
-    // 创建输入框
     HWND hEdit = CreateWindow("EDIT", currentConfig.configName,
         WS_VISIBLE | WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
         Scale(20), Scale(50), Scale(360), Scale(25),
@@ -689,14 +759,12 @@ void SaveConfigToFile() {
     SendMessage(hEdit, WM_SETFONT, (WPARAM)hFontUI, TRUE);
     SendMessage(hEdit, EM_SETLIMITTEXT, MAX_SMALL_LEN - 1, 0);
     
-    // 创建确定按钮
     HWND hOkBtn = CreateWindow("BUTTON", "确定",
         WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON,
         Scale(120), Scale(85), Scale(80), Scale(30),
         hDialog, (HMENU)IDOK, NULL, NULL);
     SendMessage(hOkBtn, WM_SETFONT, (WPARAM)hFontUI, TRUE);
     
-    // 创建取消按钮
     HWND hCancelBtn = CreateWindow("BUTTON", "取消",
         WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
         Scale(220), Scale(85), Scale(80), Scale(30),
@@ -707,7 +775,6 @@ void SaveConfigToFile() {
     SetFocus(hEdit);
     SendMessage(hEdit, EM_SETSEL, 0, -1);
     
-    // 消息循环
     MSG msg;
     BOOL dialogResult = FALSE;
     while (GetMessage(&msg, NULL, 0, 0)) {
@@ -715,7 +782,6 @@ void SaveConfigToFile() {
             if (LOWORD(msg.wParam) == IDOK) {
                 GetWindowText(hEdit, newConfigName, sizeof(newConfigName));
                 
-                // 去除首尾空格
                 char* start = newConfigName;
                 while (*start == ' ') start++;
                 char* end = start + strlen(start) - 1;
@@ -750,7 +816,6 @@ void SaveConfigToFile() {
         return;
     }
     
-    // 更新当前配置名称
     strcpy(currentConfig.configName, newConfigName);
     UpdateConfigNameDisplay();
     
@@ -764,9 +829,9 @@ void SaveConfigToFile() {
         return;
     }
     
-    fprintf(f, "[ECHTunnel]\nconfigName=%s\nserver=%s\nlisten=%s\ntoken=%s\nip=%s\ndns=%s\nech=%s\n",
+    fprintf(f, "[ECHTunnel]\nconfigName=%s\nserver=%s\nlisten=%s\ntoken=%s\nip=%s\ndns=%s\nech=%s\nconnections=%d\n",
         currentConfig.configName, currentConfig.server, currentConfig.listen, currentConfig.token, 
-        currentConfig.ip, currentConfig.dns, currentConfig.ech);
+        currentConfig.ip, currentConfig.dns, currentConfig.ech, currentConfig.connections);
     fclose(f);
     
     char msg_text[512];
@@ -816,6 +881,7 @@ void LoadConfigFromFile() {
         else if (!strcmp(line, "ip")) strcpy(currentConfig.ip, val);
         else if (!strcmp(line, "dns")) strcpy(currentConfig.dns, val);
         else if (!strcmp(line, "ech")) strcpy(currentConfig.ech, val);
+        else if (!strcmp(line, "connections")) currentConfig.connections = atoi(val);
     }
     fclose(f);
     
@@ -829,8 +895,8 @@ void LoadConfigFromFile() {
     if (isProcessRunning) {
         AppendLog("[系统] 检测到配置变更,正在重启代理...\r\n");
         StopProcess();
-        Sleep(500); // 等待进程完全停止
-        SaveConfig(); // 保存新配置到默认配置文件
+        Sleep(500);
+        SaveConfig();
         StartProcess();
     }
 }
